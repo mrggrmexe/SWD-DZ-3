@@ -1,0 +1,6 @@
+@AntiPlagiarism_HostAddress = http://localhost:5124
+
+GET {{AntiPlagiarism_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

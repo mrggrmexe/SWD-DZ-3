@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "dgSpecHash": "Fk758YwyKL8=",
+  "success": true,
+  "projectFilePath": "/Users/mrggrm/Documents/GitHub/SWD-DZ-3/AntiPlagiarism/Gateway/Gateway.csproj",
+  "expectedPackageFiles": [
+    "/Users/mrggrm/.nuget/packages/microsoft.aspnetcore.openapi/9.0.10/microsoft.aspnetcore.openapi.9.0.10.nupkg.sha512",
+    "/Users/mrggrm/.nuget/packages/microsoft.openapi/1.6.17/microsoft.openapi.1.6.17.nupkg.sha512"
+  ],
+  "logs": []
+}
