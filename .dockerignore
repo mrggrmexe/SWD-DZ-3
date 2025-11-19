@@ -1,0 +1,12 @@
+bin/
+obj/
+.git/
+.gitignore
+docker-compose.yml
+.idea/
+*.user
+*.swp
+*.sln
+*.md
+logs/
+.env
