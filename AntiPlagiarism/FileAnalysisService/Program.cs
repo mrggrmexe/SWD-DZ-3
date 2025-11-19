@@ -1,12 +1,22 @@
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.OpenApi;
+
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
-// Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
+// OpenAPI
 builder.Services.AddOpenApi();
+builder.Services.AddEndpointsApiExplorer();
+
+// TODO: DbContext для работ и отчетов
+// TODO: модели Work / Report
+
+builder.Services.AddHttpClient("FileStoringService", client =>
+{
+    client.BaseAddress = new Uri("http://localhost:5001"); // TODO: вынести в конфиг / env
+});
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
@@ -14,28 +24,44 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
-var summaries = new[]
-{
-    "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
-};
+// Health-check
+app.MapGet("/health", () => Results.Ok("FileAnalysisService OK"))
+    .WithName("FileAnalysisHealth")
+    .WithTags("Health");
 
-app.MapGet("/weatherforecast", () =>
+// Запуск анализа работы
+app.MapPost("/analyze/{workId:int}", async (
+        int workId,
+        [FromServices] IHttpClientFactory httpClientFactory) =>
     {
-        var forecast = Enumerable.Range(1, 5).Select(index =>
-                new WeatherForecast
-                (
-                    DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-                    Random.Shared.Next(-20, 55),
-                    summaries[Random.Shared.Next(summaries.Length)]
-                ))
-            .ToArray();
-        return forecast;
+        // TODO:
+        // 1. Получить данные/файл из FileStoringService
+        // 2. Выполнить алгоритм определения плагиата
+        // 3. Сохранить отчет в БД
+        // 4. Вернуть краткую информацию об отчете
+
+        return Results.Ok(new
+        {
+            WorkId = workId,
+            Message = "Analyze endpoint (stub in FileAnalysisService)",
+            Note = "Здесь будет логика анализа и сохранения отчета"
+        });
     })
-    .WithName("GetWeatherForecast");
+    .WithName("AnalyzeWork")
+    .WithTags("Analysis");
+
+// Получение всех отчетов по работе
+app.MapGet("/works/{workId:int}/reports", (int workId) =>
+    {
+        // TODO: достать отчеты из БД
+        return Results.Ok(new
+        {
+            WorkId = workId,
+            Message = "Get reports (stub in FileAnalysisService)",
+            Note = "Здесь будет возврат списка отчетов по работе"
+        });
+    })
+    .WithName("GetReportsForWork")
+    .WithTags("Reports");
 
 app.Run();
-
-record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
-}

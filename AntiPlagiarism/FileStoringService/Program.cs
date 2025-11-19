@@ -1,12 +1,16 @@
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.OpenApi;
+
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
-// Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
+// OpenAPI
 builder.Services.AddOpenApi();
+builder.Services.AddEndpointsApiExplorer();
+
+// TODO: добавить DbContext, конфигурацию хранилища файлов и т.д.
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
@@ -14,28 +18,41 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
-var summaries = new[]
-{
-    "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
-};
+// Health-check
+app.MapGet("/health", () => Results.Ok("FileStoringService OK"))
+    .WithName("FileStoringHealth")
+    .WithTags("Health");
 
-app.MapGet("/weatherforecast", () =>
+// Загрузка файла (локальный API, к нему будет ходить Gateway)
+app.MapPost("/files", async (HttpRequest request) =>
     {
-        var forecast = Enumerable.Range(1, 5).Select(index =>
-                new WeatherForecast
-                (
-                    DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-                    Random.Shared.Next(-20, 55),
-                    summaries[Random.Shared.Next(summaries.Length)]
-                ))
-            .ToArray();
-        return forecast;
+        // TODO:
+        // 1. Прочитать multipart/form-data
+        // 2. Сохранить файл (локально / S3 / volume)
+        // 3. Записать метаданные в БД
+        // 4. Вернуть идентификатор работы / файла
+
+        return Results.Ok(new
+        {
+            Message = "File upload endpoint (stub in FileStoringService)",
+            Note = "Здесь будет логика сохранения файла и метаданных"
+        });
     })
-    .WithName("GetWeatherForecast");
+    .WithName("UploadFile")
+    .WithTags("Files");
+
+// Получение метаданных по файлу / работе
+app.MapGet("/files/{fileId:int}/meta", (int fileId) =>
+    {
+        // TODO: достать метаданные из БД
+        return Results.Ok(new
+        {
+            FileId = fileId,
+            Message = "Get file meta (stub in FileStoringService)",
+            Note = "Здесь будет возврат информации о файле/работе"
+        });
+    })
+    .WithName("GetFileMeta")
+    .WithTags("Files");
 
 app.Run();
-
-record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
-}
