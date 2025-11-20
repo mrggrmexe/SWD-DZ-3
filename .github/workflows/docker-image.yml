@@ -23,17 +23,20 @@ jobs:
 
       # 3. Восстанавливаем зависимости
       - name: Restore dependencies
+        working-directory: ./AntiPlagiarism
         run: dotnet restore AntiPlagiarism.sln
 
-      # 4. Сборка .NET решений
+      # 4. Сборка .NET решения
       - name: Build solution
+        working-directory: ./AntiPlagiarism
         run: dotnet build AntiPlagiarism.sln --configuration Release --no-restore
 
-      # 5. Тесты 
+      # 5. Тесты (если будут проекты с тестами)
       - name: Run tests
+        working-directory: ./AntiPlagiarism
         run: dotnet test AntiPlagiarism.sln --configuration Release --no-build
 
-      # 6. Сборка Docker образов через docker compose
+      # 6. Сборка Docker-образов через docker compose
       - name: Build Docker images (docker compose)
-        working-directory: ./deploy
+        working-directory: ./AntiPlagiarism/deploy
         run: docker compose build
