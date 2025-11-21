@@ -1,0 +1,33 @@
+AntiPlagiarism System — API Contract
+====================================
+
+Версия: 1.0
+
+1. Gateway API
+--------------
+POST /works/upload — загрузка работы (multipart/form-data).
+GET /assignments/{assignmentId}/reports — список отчётов по заданию.
+GET /reports/{reportId} — детальный отчёт.
+GET /health — проверка доступности.
+
+2. FileStoringService API
+-------------------------
+POST /files — сохранить файл, вернуть workId и метаданные.
+GET /files/{workId}/meta — метаданные сдачи.
+GET /health — проверка доступности.
+
+3. FileAnalysisService API
+--------------------------
+POST /analyze/{workId} — запуск анализа конкретной сдачи.
+GET /assignments/{assignmentId}/reports — отчёты по заданию.
+GET /reports/{reportId} — детальный отчёт.
+GET /health — проверка доступности.
+
+4. Основные DTO
+---------------
+WorkMetaDto: { workId, assignmentId, studentId, submittedAt, filePath }
+ReportSummaryDto: { reportId, workId, studentId, isPlagiarism, status, createdAt, wordCloudUrl }
+ReportDetailsDto: то же + assignmentId, details
+UploadWorkResponseDto: { workId, assignmentId, studentId, submittedAt, analysisStarted, error }
+AssignmentReportsResponseDto: { assignmentId, reports[] }
+
