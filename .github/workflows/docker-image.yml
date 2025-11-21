@@ -1,0 +1,42 @@
+name: Docker Image CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Клонируем репозиторий
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Ставим .NET 9 SDK
+      - name: Setup .NET 9 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      # 3. Восстанавливаем зависимости
+      - name: Restore dependencies
+        working-directory: ./AntiPlagiarism
+        run: dotnet restore AntiPlagiarism.sln
+
+      # 4. Сборка .NET решения
+      - name: Build solution
+        working-directory: ./AntiPlagiarism
+        run: dotnet build AntiPlagiarism.sln --configuration Release --no-restore
+
+      # 5. Тесты (если будут проекты с тестами)
+      - name: Run tests
+        working-directory: ./AntiPlagiarism
+        run: dotnet test AntiPlagiarism.sln --configuration Release --no-build
+
+      # 6. Сборка Docker-образов через docker compose
+      - name: Build Docker images (docker compose)
+        working-directory: ./AntiPlagiarism/deploy
+        run: docker compose build
