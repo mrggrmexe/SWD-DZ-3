@@ -1,4 +1,5 @@
-using System.Collections.Concurrent;
+using FileStoringService.Models;
+using FileStoringService.Repositories;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.OpenApi;
 using Shared.DTOs;
@@ -11,30 +12,31 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddOpenApi();
 builder.Services.AddEndpointsApiExplorer();
 
-// ProblemDetails, если захочешь отдавать единый формат ошибок
+// ProblemDetails
 builder.Services.AddProblemDetails();
+
+// Регистрируем in-memory репозиторий сдач
+builder.Services.AddSingleton<IWorkRepository, InMemoryWorkRepository>();
 
 var app = builder.Build();
 
 // ---------- НАСТРОЙКА КОРНЯ ХРАНИЛИЩА ФАЙЛОВ ----------
 
-// 1) Пробуем взять из ENV: FILE_STORAGE_ROOT
+// 1) ENV: FILE_STORAGE_ROOT
 var envStorageRoot = app.Configuration["FILE_STORAGE_ROOT"];
 
-// 2) Если нет ENV, пробуем из appsettings.json: "FileStorage:RootPath"
+// 2) appsettings.json: "FileStorage:RootPath"
 var configStorageRoot = app.Configuration["FileStorage:RootPath"];
 
-// 3) Дефолт: {ContentRoot}/storage
+// 3) дефолт: {ContentRoot}/storage
 var defaultStorageRoot = Path.Combine(app.Environment.ContentRootPath, "storage");
 
-// Выбираем первый непустой вариант
 var storageRoot = !string.IsNullOrWhiteSpace(envStorageRoot)
     ? envStorageRoot
     : !string.IsNullOrWhiteSpace(configStorageRoot)
         ? configStorageRoot!
         : defaultStorageRoot;
 
-// Создаём папку, если её ещё нет
 Directory.CreateDirectory(storageRoot);
 
 app.Logger.LogInformation("File storage root: {StorageRoot}", storageRoot);
@@ -50,12 +52,6 @@ app.UseExceptionHandler();
 app.UseStatusCodePages();
 app.UseHttpsRedirection();
 
-// ---------- IN-MEMORY ХРАНИЛИЩЕ МЕТАДАННЫХ ----------
-
-// workId -> WorkMetaDto
-var worksStorage = new ConcurrentDictionary<int, WorkMetaDto>();
-var workIdCounter = 0;
-
 // ---------- ENDPOINTS ----------
 
 // Health-check
@@ -68,6 +64,7 @@ app.MapGet("/health", () => Results.Ok("FileStoringService OK"))
 app.MapPost("/files", async (
         HttpContext context,
         [FromServices] ILogger<Program> logger,
+        [FromServices] IWorkRepository workRepository,
         CancellationToken cancellationToken) =>
     {
         if (!context.Request.HasFormContentType)
@@ -101,13 +98,11 @@ app.MapPost("/files", async (
                 statusCode: StatusCodes.Status400BadRequest);
         }
 
-        // Генерируем workId (в реальной системе — из БД)
-        var workId = Interlocked.Increment(ref workIdCounter);
         var submittedAt = DateTime.UtcNow;
 
         // Формируем безопасное имя файла
         var safeFileName = Path.GetFileName(file.FileName);
-        var newFileName = $"{workId}_{assignmentId}_{studentId}_{safeFileName}";
+        var newFileName = $"{Guid.NewGuid():N}_{assignmentId}_{studentId}_{safeFileName}";
         var filePath = Path.Combine(storageRoot, newFileName);
 
         try
@@ -118,7 +113,8 @@ app.MapPost("/files", async (
         catch (Exception ex)
         {
             logger.LogError(ex,
-                "Ошибка при сохранении файла workId={WorkId}", workId);
+                "Ошибка при сохранении файла для студента {StudentId}, assignment {AssignmentId}",
+                studentId, assignmentId);
 
             return Results.Problem(
                 title: "Ошибка сохранения файла",
@@ -126,16 +122,27 @@ app.MapPost("/files", async (
                 statusCode: StatusCodes.Status500InternalServerError);
         }
 
-        var meta = new WorkMetaDto
+        // Создаём доменную сущность Work
+        var work = new Work
         {
-            WorkId = workId,
-            AssignmentId = assignmentId,
             StudentId = studentId,
+            AssignmentId = assignmentId,
             SubmittedAt = submittedAt,
             FilePath = filePath
         };
 
-        worksStorage[workId] = meta;
+        // Сохраняем через репозиторий (Id присвоится внутри)
+        work = await workRepository.AddAsync(work, cancellationToken);
+
+        // Формируем DTO для ответа
+        var meta = new WorkMetaDto
+        {
+            WorkId = work.Id,
+            AssignmentId = work.AssignmentId,
+            StudentId = work.StudentId,
+            SubmittedAt = work.SubmittedAt,
+            FilePath = work.FilePath
+        };
 
         return Results.Ok(meta);
     })
@@ -146,10 +153,13 @@ app.MapPost("/files", async (
 
 
 // GET /files/{workId}/meta — метаданные сдачи
-app.MapGet("/files/{workId:int}/meta", (
-        int workId) =>
+app.MapGet("/files/{workId:int}/meta", async (
+        int workId,
+        [FromServices] IWorkRepository workRepository,
+        CancellationToken cancellationToken) =>
     {
-        if (!worksStorage.TryGetValue(workId, out var meta))
+        var work = await workRepository.GetByIdAsync(workId, cancellationToken);
+        if (work is null)
         {
             return Results.Problem(
                 title: "Сдача не найдена",
@@ -157,13 +167,19 @@ app.MapGet("/files/{workId:int}/meta", (
                 statusCode: StatusCodes.Status404NotFound);
         }
 
+        var meta = new WorkMetaDto
+        {
+            WorkId = work.Id,
+            AssignmentId = work.AssignmentId,
+            StudentId = work.StudentId,
+            SubmittedAt = work.SubmittedAt,
+            FilePath = work.FilePath
+        };
+
         return Results.Ok(meta);
     })
     .Produces<WorkMetaDto>(StatusCodes.Status200OK)
     .WithName("GetFileMeta")
     .WithTags("Files");
-
-
-// (Опционально) здесь можно добавить GET /files/{workId}/download для отдачи бинарника
 
 app.Run();
