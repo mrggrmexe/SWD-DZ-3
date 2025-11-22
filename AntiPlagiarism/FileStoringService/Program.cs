@@ -1,35 +1,70 @@
 using System.Collections.Concurrent;
-using System.Net.Mime;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.OpenApi;
 using Shared.DTOs;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// OpenAPI
+// ---------- СЕРВИСЫ ----------
+
+// OpenAPI (встроенный в .NET 9)
 builder.Services.AddOpenApi();
 builder.Services.AddEndpointsApiExplorer();
 
-// Простое in-memory хранилище метаданных (для старта; позже заменим на БД)
-var worksStorage = new ConcurrentDictionary<int, WorkMetaDto>();
-var workIdCounter = 0;
+// ProblemDetails, если захочешь отдавать единый формат ошибок
+builder.Services.AddProblemDetails();
 
 var app = builder.Build();
+
+// ---------- НАСТРОЙКА КОРНЯ ХРАНИЛИЩА ФАЙЛОВ ----------
+
+// 1) Пробуем взять из ENV: FILE_STORAGE_ROOT
+var envStorageRoot = app.Configuration["FILE_STORAGE_ROOT"];
+
+// 2) Если нет ENV, пробуем из appsettings.json: "FileStorage:RootPath"
+var configStorageRoot = app.Configuration["FileStorage:RootPath"];
+
+// 3) Дефолт: {ContentRoot}/storage
+var defaultStorageRoot = Path.Combine(app.Environment.ContentRootPath, "storage");
+
+// Выбираем первый непустой вариант
+var storageRoot = !string.IsNullOrWhiteSpace(envStorageRoot)
+    ? envStorageRoot
+    : !string.IsNullOrWhiteSpace(configStorageRoot)
+        ? configStorageRoot!
+        : defaultStorageRoot;
+
+// Создаём папку, если её ещё нет
+Directory.CreateDirectory(storageRoot);
+
+app.Logger.LogInformation("File storage root: {StorageRoot}", storageRoot);
+
+// ---------- PIPELINE ----------
 
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
 }
 
+app.UseExceptionHandler();
+app.UseStatusCodePages();
 app.UseHttpsRedirection();
 
-var storageRoot = Path.Combine(app.Environment.ContentRootPath, "storage");
-Directory.CreateDirectory(storageRoot);
+// ---------- IN-MEMORY ХРАНИЛИЩЕ МЕТАДАННЫХ ----------
 
+// workId -> WorkMetaDto
+var worksStorage = new ConcurrentDictionary<int, WorkMetaDto>();
+var workIdCounter = 0;
+
+// ---------- ENDPOINTS ----------
+
+// Health-check
 app.MapGet("/health", () => Results.Ok("FileStoringService OK"))
     .WithName("FileStoringHealth")
     .WithTags("Health");
 
+
+// POST /files — приём файла и метаданных, возврат WorkMetaDto
 app.MapPost("/files", async (
         HttpContext context,
         [FromServices] ILogger<Program> logger,
@@ -66,7 +101,7 @@ app.MapPost("/files", async (
                 statusCode: StatusCodes.Status400BadRequest);
         }
 
-        // Генерируем workId (в реальной системе это было бы из БД)
+        // Генерируем workId (в реальной системе — из БД)
         var workId = Interlocked.Increment(ref workIdCounter);
         var submittedAt = DateTime.UtcNow;
 
@@ -109,6 +144,8 @@ app.MapPost("/files", async (
     .WithName("UploadFile")
     .WithTags("Files");
 
+
+// GET /files/{workId}/meta — метаданные сдачи
 app.MapGet("/files/{workId:int}/meta", (
         int workId) =>
     {
@@ -126,7 +163,7 @@ app.MapGet("/files/{workId:int}/meta", (
     .WithName("GetFileMeta")
     .WithTags("Files");
 
-// (Опционально) GET /files/{workId}/download для FileAnalysisService
-// отдавать сам файл.
+
+// (Опционально) здесь можно добавить GET /files/{workId}/download для отдачи бинарника
 
 app.Run();

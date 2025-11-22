@@ -7,13 +7,14 @@ services:
       dockerfile: deploy/gateway/Dockerfile
     container_name: gateway
     ports:
-      - "5000:8080"       # host:container
+      - "5000:8080" # host:container
+    environment:
+      ASPNETCORE_URLS: "http://0.0.0.0:8080"
+      FILE_STORING_BASE_URL: "http://file-storing-service:8080"
+      FILE_ANALYSIS_BASE_URL: "http://file-analysis-service:8080"
     depends_on:
       - file-storing-service
       - file-analysis-service
-    environment:
-      FILE_STORING_BASE_URL: "http://file-storing-service:8080"
-      FILE_ANALYSIS_BASE_URL: "http://file-analysis-service:8080"
 
   file-storing-service:
     build:
@@ -23,8 +24,10 @@ services:
     ports:
       - "5001:8080"
     environment:
-      # сюда позже добавить, например, строку подключения к БД
       ASPNETCORE_URLS: "http://0.0.0.0:8080"
+      FILE_STORAGE_ROOT: "/app/storage"
+    volumes:
+      - files_data:/app/storage
 
   file-analysis-service:
     build:
@@ -34,10 +37,10 @@ services:
     ports:
       - "5002:8080"
     environment:
-      FILE_STORING_BASE_URL: "http://file-storing-service:8080"
       ASPNETCORE_URLS: "http://0.0.0.0:8080"
+      FILE_STORING_BASE_URL: "http://file-storing-service:8080"
 
-  # Пример БД (PostgreSQL, добавишь позже)
+  # Пример БД
   # db:
   #   image: postgres:16
   #   container_name: antiplag-db
@@ -50,6 +53,6 @@ services:
   #   volumes:
   #     - db_data:/var/lib/postgresql/data
 
-# volumes:
-#   db_data:
-
+volumes:
+  files_data:
+  # db_data:
