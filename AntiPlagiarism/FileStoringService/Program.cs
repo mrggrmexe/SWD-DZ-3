@@ -12,10 +12,10 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddOpenApi();
 builder.Services.AddEndpointsApiExplorer();
 
-// ProblemDetails
+// Единый формат ошибок
 builder.Services.AddProblemDetails();
 
-// Регистрируем in-memory репозиторий сдач
+// In-memory репозиторий сдач
 builder.Services.AddSingleton<IWorkRepository, InMemoryWorkRepository>();
 
 var app = builder.Build();
@@ -38,7 +38,6 @@ var storageRoot = !string.IsNullOrWhiteSpace(envStorageRoot)
         : defaultStorageRoot;
 
 Directory.CreateDirectory(storageRoot);
-
 app.Logger.LogInformation("File storage root: {StorageRoot}", storageRoot);
 
 // ---------- PIPELINE ----------
@@ -67,6 +66,7 @@ app.MapPost("/files", async (
         [FromServices] IWorkRepository workRepository,
         CancellationToken cancellationToken) =>
     {
+        // 1. Проверяем, что запрос multipart/form-data
         if (!context.Request.HasFormContentType)
         {
             return Results.Problem(
@@ -81,6 +81,7 @@ app.MapPost("/files", async (
         var studentId = form["studentId"].ToString();
         var assignmentId = form["assignmentId"].ToString();
 
+        // 2. Базовая валидация
         if (file is null || file.Length == 0)
         {
             return Results.Problem(
@@ -98,13 +99,27 @@ app.MapPost("/files", async (
                 statusCode: StatusCodes.Status400BadRequest);
         }
 
+        // 3. Время сдачи — фиксируем сейчас (UTC)
         var submittedAt = DateTime.UtcNow;
 
-        // Формируем безопасное имя файла
+        // 4. Создаём Work без Id и FilePath
+        var work = new Work
+        {
+            StudentId = studentId,
+            AssignmentId = assignmentId,
+            SubmittedAt = submittedAt,
+            FilePath = string.Empty // заполним после генерации workId и сохранения файла
+        };
+
+        // 5. Сохраняем Work в репозиторий — он генерирует новый Id (workId)
+        work = await workRepository.AddAsync(work, cancellationToken);
+
+        // 6. Формируем имя файла на основе work.Id
         var safeFileName = Path.GetFileName(file.FileName);
-        var newFileName = $"{Guid.NewGuid():N}_{assignmentId}_{studentId}_{safeFileName}";
+        var newFileName = $"{work.Id}_{work.AssignmentId}_{work.StudentId}_{safeFileName}";
         var filePath = Path.Combine(storageRoot, newFileName);
 
+        // 7. Сохраняем файл на диск
         try
         {
             await using var stream = File.Create(filePath);
@@ -113,8 +128,7 @@ app.MapPost("/files", async (
         catch (Exception ex)
         {
             logger.LogError(ex,
-                "Ошибка при сохранении файла для студента {StudentId}, assignment {AssignmentId}",
-                studentId, assignmentId);
+                "Ошибка при сохранении файла для workId={WorkId}", work.Id);
 
             return Results.Problem(
                 title: "Ошибка сохранения файла",
@@ -122,19 +136,10 @@ app.MapPost("/files", async (
                 statusCode: StatusCodes.Status500InternalServerError);
         }
 
-        // Создаём доменную сущность Work
-        var work = new Work
-        {
-            StudentId = studentId,
-            AssignmentId = assignmentId,
-            SubmittedAt = submittedAt,
-            FilePath = filePath
-        };
+        // 8. Обновляем путь к файлу в сущности
+        work.FilePath = filePath;
 
-        // Сохраняем через репозиторий (Id присвоится внутри)
-        work = await workRepository.AddAsync(work, cancellationToken);
-
-        // Формируем DTO для ответа
+        // 9. Формируем DTO для ответа
         var meta = new WorkMetaDto
         {
             WorkId = work.Id,
@@ -144,6 +149,7 @@ app.MapPost("/files", async (
             FilePath = work.FilePath
         };
 
+        // 10. Возвращаем JSON с workId и метаданными
         return Results.Ok(meta);
     })
     .Accepts<IFormFile>("multipart/form-data")
