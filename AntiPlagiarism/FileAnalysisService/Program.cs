@@ -3,6 +3,7 @@ using System.Net;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.OpenApi;
 using Shared.DTOs;
+using System.Text.Json;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -16,7 +17,16 @@ builder.Services.AddHttpClient("FileStoringService", (sp, client) =>
     var configuration = sp.GetRequiredService<IConfiguration>();
     var baseUrl = configuration["FILE_STORING_BASE_URL"] ?? "http://localhost:5001";
     client.BaseAddress = new Uri(baseUrl);
+    client.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+    client.Timeout = TimeSpan.FromSeconds(10);
 });
+
+// Кэш для метаданных работ (workId -> метаданные)
+var works = new ConcurrentDictionary<int, WorkMetaDto>();
+
+// Кэш для отчётов (reportId -> отчёт)
+var reports = new ConcurrentDictionary<int, ReportDetailsDto>();
+var reportIdCounter = 0;
 
 var app = builder.Build();
 
@@ -27,33 +37,97 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
-// workId -> WorkMetaDto (мы можем кэшировать метаданные из FileStoringService)
-var works = new ConcurrentDictionary<int, WorkMetaDto>();
+app.MapGet("/health", () => Results.Ok(new
+{
+    status = "FileAnalysisService OK",
+    timestamp = DateTime.UtcNow,
+    service = "FileAnalysisService",
+    version = "1.0.0",
+    metrics = new
+    {
+        cachedWorks = works.Count,
+        cachedReports = reports.Count
+    }
+}))
+.WithName("FileAnalysisHealth")
+.WithTags("Health");
 
-var reports = new ConcurrentDictionary<int, ReportDetailsDto>();
-var reportIdCounter = 0;
-
-app.MapGet("/health", () => Results.Ok("FileAnalysisService OK"))
-    .WithName("FileAnalysisHealth")
-    .WithTags("Health");
-
-app.MapPost("/analyze/{workId:int}", async (
-        int workId,
+app.MapPost("/analyze/{workId}", async (
+        string workId,
+        HttpContext context,
         [FromServices] IHttpClientFactory httpClientFactory,
-        [FromServices] ILogger<Program> logger,
         CancellationToken cancellationToken) =>
     {
-        // 1. Получаем метаданные работы из FileStoringService (если ещё не кэшировали)
-        if (!works.TryGetValue(workId, out var workMeta))
+        var logger = context.RequestServices.GetRequiredService<ILogger<Program>>();
+        
+        // Получаем correlationId из контекста
+        var correlationId = context.Request.Headers["X-Correlation-Id"].FirstOrDefault() 
+            ?? Guid.NewGuid().ToString();
+        
+        logger.LogInformation("[{CorrelationId}] Starting analysis for workId={WorkId}", 
+            correlationId, workId);
+
+        // Проверяем формат workId
+        if (string.IsNullOrWhiteSpace(workId))
         {
+            logger.LogWarning("[{CorrelationId}] Empty workId provided", correlationId);
+            return Results.Problem(
+                title: "Некорректный идентификатор работы",
+                detail: "workId не может быть пустым",
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        // Преобразуем workId в int для кэша
+        if (!int.TryParse(workId, out int workIdInt))
+        {
+            logger.LogWarning("[{CorrelationId}] Invalid workId format: {WorkId}", correlationId, workId);
+            return Results.Problem(
+                title: "Неверный формат workId",
+                detail: "workId должен быть числом",
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        // 1. Получаем метаданные работы из FileStoringService
+        WorkMetaDto workMeta;
+        
+        if (works.TryGetValue(workIdInt, out var cachedWorkMeta))
+        {
+            logger.LogDebug("[{CorrelationId}] Found cached metadata for workId={WorkId}", 
+                correlationId, workId);
+            workMeta = cachedWorkMeta;
+        }
+        else
+        {
+            logger.LogDebug("[{CorrelationId}] Fetching metadata from FileStoringService for workId={WorkId}", 
+                correlationId, workId);
+            
             var fileStoreClient = httpClientFactory.CreateClient("FileStoringService");
 
-            var response = await fileStoreClient.GetAsync(
-                $"/files/{workId}/meta",
-                cancellationToken);
+            // Добавляем correlationId в запрос
+            var request = new HttpRequestMessage(HttpMethod.Get, $"/api/files/{workIdInt}/meta");
+            request.Headers.Add("X-Correlation-Id", correlationId);
+
+            HttpResponseMessage response;
+            try
+            {
+                response = await fileStoreClient.SendAsync(request, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "[{CorrelationId}] Failed to connect to FileStoringService for workId={WorkId}", 
+                    correlationId, workId);
+                
+                return Results.Problem(
+                    title: "Сервис хранения недоступен",
+                    detail: "Не удалось получить метаданные работы. Попробуйте позже.",
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
 
             if (response.StatusCode == HttpStatusCode.NotFound)
             {
+                logger.LogWarning("[{CorrelationId}] Work not found: workId={WorkId}", 
+                    correlationId, workId);
+                
                 return Results.Problem(
                     title: "Сдача не найдена",
                     detail: $"Сдача с идентификатором {workId} отсутствует в FileStoringService",
@@ -63,9 +137,8 @@ app.MapPost("/analyze/{workId:int}", async (
             if (!response.IsSuccessStatusCode)
             {
                 var body = await response.Content.ReadAsStringAsync(cancellationToken);
-                logger.LogWarning(
-                    "FileStoringService вернул ошибку при получении meta workId={WorkId}: {Status} {Body}",
-                    workId, response.StatusCode, body);
+                logger.LogWarning("[{CorrelationId}] FileStoringService returned error for workId={WorkId}: {Status} {Body}", 
+                    correlationId, workId, response.StatusCode, body);
 
                 return Results.Problem(
                     title: "Ошибка FileStoringService",
@@ -73,16 +146,42 @@ app.MapPost("/analyze/{workId:int}", async (
                     statusCode: StatusCodes.Status502BadGateway);
             }
 
-            workMeta = await response.Content
-                .ReadFromJsonAsync<WorkMetaDto>(cancellationToken: cancellationToken)
-                       ?? throw new InvalidOperationException(
-                           "Пустой ответ при получении метаданных сдачи");
+            // Парсим JSON ответ
+            try
+            {
+                workMeta = await response.Content.ReadFromJsonAsync<WorkMetaDto>(cancellationToken);
+                if (workMeta == null)
+                {
+                    logger.LogError("[{CorrelationId}] Failed to parse metadata for workId={WorkId}", correlationId, workId);
+                    return Results.Problem(
+                        title: "Ошибка обработки данных",
+                        detail: "Не удалось обработать метаданные сдачи",
+                        statusCode: StatusCodes.Status500InternalServerError);
+                }
 
-            works[workId] = workMeta;
+                // Кэшируем результат
+                works[workIdInt] = workMeta;
+                
+                logger.LogInformation("[{CorrelationId}] Retrieved metadata for workId={WorkId}: studentId={StudentId}, assignmentId={AssignmentId}", 
+                    correlationId, workId, workMeta.StudentId, workMeta.AssignmentId);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "[{CorrelationId}] Failed to parse metadata from FileStoringService for workId={WorkId}", 
+                    correlationId, workId);
+                
+                return Results.Problem(
+                    title: "Ошибка обработки данных",
+                    detail: "Не удалось обработать метаданные сдачи",
+                    statusCode: StatusCodes.Status500InternalServerError);
+            }
         }
 
         // 2. Реализуем простой алгоритм плагиата:
         // есть ли более ранняя сдача этой же работы (assignmentId), но от другого студента?
+        logger.LogDebug("[{CorrelationId}] Checking for plagiarism: assignmentId={AssignmentId}, studentId={StudentId}, submittedAt={SubmittedAt}", 
+            correlationId, workMeta.AssignmentId, workMeta.StudentId, workMeta.SubmittedAt);
+
         var isPlagiarism = works.Values.Any(x =>
             x.AssignmentId == workMeta.AssignmentId &&
             x.StudentId != workMeta.StudentId &&
@@ -91,6 +190,7 @@ app.MapPost("/analyze/{workId:int}", async (
         var reportId = Interlocked.Increment(ref reportIdCounter);
         var createdAt = DateTime.UtcNow;
 
+        // Создаем отчет
         var report = new ReportDetailsDto
         {
             ReportId = reportId,
@@ -100,13 +200,18 @@ app.MapPost("/analyze/{workId:int}", async (
             IsPlagiarism = isPlagiarism,
             Status = "Done",
             CreatedAt = createdAt,
+            CompletedAt = createdAt,
             Details = isPlagiarism
                 ? "Обнаружена более ранняя сдача той же работы другим студентом"
                 : "Более ранних сдач этой работы другими студентами не обнаружено",
-            WordCloudUrl = null // позже сюда можно добавить URL от QuickChart
+            WordCloudUrl = null,
+            SimilarityScore = isPlagiarism ? 1.0 : 0.0
         };
 
         reports[reportId] = report;
+
+        logger.LogInformation("[{CorrelationId}] Analysis completed for workId={WorkId}: plagiarism={Plagiarism}, reportId={ReportId}", 
+            correlationId, workId, isPlagiarism, reportId);
 
         // Для удобства сразу отдадим краткий отчёт
         var summary = new ReportSummaryDto
@@ -120,14 +225,24 @@ app.MapPost("/analyze/{workId:int}", async (
             WordCloudUrl = report.WordCloudUrl
         };
 
+        // Добавляем заголовки для трассировки
+        context.Response.Headers.Append("X-Correlation-Id", correlationId);
+        context.Response.Headers.Append("X-Report-Id", reportId.ToString());
+
         return Results.Ok(summary);
     })
-    .Produces<ReportSummaryDto>(StatusCodes.Status200OK)
+    .WithTags("Analysis")
     .WithName("AnalyzeWork")
-    .WithTags("Analysis");
+    .Accepts<string>("application/json")
+    .Produces<ReportSummaryDto>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status502BadGateway)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
-app.MapGet("/assignments/{assignmentId}/reports", (
-        string assignmentId) =>
+app.MapGet("/analyze/assignment/{assignmentId}/reports", (
+        string assignmentId,
+        HttpContext context) =>
     {
         if (string.IsNullOrWhiteSpace(assignmentId))
         {
@@ -137,35 +252,66 @@ app.MapGet("/assignments/{assignmentId}/reports", (
                 statusCode: StatusCodes.Status400BadRequest);
         }
 
+        // Проверяем, является ли assignmentId числом
+        if (!int.TryParse(assignmentId, out int assignmentIdInt))
+        {
+            return Results.Problem(
+                title: "Неверный формат assignmentId",
+                detail: "assignmentId должен быть числом",
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var relevantReports = reports.Values
+            .Where(r => r.AssignmentId == assignmentIdInt)
+            .Select(r => new ReportSummaryDto
+            {
+                ReportId = r.ReportId,
+                WorkId = r.WorkId,
+                StudentId = r.StudentId,
+                IsPlagiarism = r.IsPlagiarism,
+                Status = r.Status,
+                CreatedAt = r.CreatedAt,
+                WordCloudUrl = r.WordCloudUrl
+            })
+            .OrderBy(r => r.CreatedAt)
+            .ToList();
+
         var result = new AssignmentReportsResponseDto
         {
-            AssignmentId = assignmentId,
-            Reports = reports.Values
-                .Where(r => r.AssignmentId == assignmentId)
-                .Select(r => new ReportSummaryDto
-                {
-                    ReportId = r.ReportId,
-                    WorkId = r.WorkId,
-                    StudentId = r.StudentId,
-                    IsPlagiarism = r.IsPlagiarism,
-                    Status = r.Status,
-                    CreatedAt = r.CreatedAt,
-                    WordCloudUrl = r.WordCloudUrl
-                })
-                .OrderBy(r => r.CreatedAt)
-                .ToList()
+            AssignmentId = assignmentIdInt,
+            Reports = relevantReports,
+            TotalCount = relevantReports.Count,
+            PlagiarismCount = relevantReports.Count(r => r.IsPlagiarism)
         };
 
         return Results.Ok(result);
     })
-    .Produces<AssignmentReportsResponseDto>(StatusCodes.Status200OK)
+    .WithTags("Reports")
     .WithName("GetReportsForAssignment")
-    .WithTags("Reports");
+    .Produces<AssignmentReportsResponseDto>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest);
 
-app.MapGet("/reports/{reportId:int}", (
-        int reportId) =>
+app.MapGet("/analyze/reports/{reportId}", (
+        string reportId,
+        HttpContext context) =>
     {
-        if (!reports.TryGetValue(reportId, out var report))
+        if (string.IsNullOrWhiteSpace(reportId))
+        {
+            return Results.Problem(
+                title: "Некорректный идентификатор отчёта",
+                detail: "reportId не может быть пустым",
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        if (!int.TryParse(reportId, out int reportIdInt))
+        {
+            return Results.Problem(
+                title: "Неверный формат reportId",
+                detail: "reportId должен быть числом",
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        if (!reports.TryGetValue(reportIdInt, out var report))
         {
             return Results.Problem(
                 title: "Отчёт не найден",
@@ -175,8 +321,10 @@ app.MapGet("/reports/{reportId:int}", (
 
         return Results.Ok(report);
     })
-    .Produces<ReportDetailsDto>(StatusCodes.Status200OK)
+    .WithTags("Reports")
     .WithName("GetReportById")
-    .WithTags("Reports");
+    .Produces<ReportDetailsDto>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status404NotFound);
 
 app.Run();

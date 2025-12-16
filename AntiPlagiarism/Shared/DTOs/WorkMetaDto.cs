@@ -1,32 +1,33 @@
+using System.Text.Json.Serialization;
+
 namespace Shared.DTOs;
 
-/// <summary>
-/// Метаданные о конкретной сдаче работы (без содержимого файла).
-/// </summary>
 public class WorkMetaDto
 {
-    /// <summary>
-    /// Идентификатор сдачи (work / submission).
-    /// </summary>
+    [JsonPropertyName("workId")]
     public int WorkId { get; set; }
-
-    /// <summary>
-    /// Идентификатор задания / контрольной работы.
-    /// </summary>
-    public string AssignmentId { get; set; } = null!;
-
-    /// <summary>
-    /// Идентификатор студента.
-    /// </summary>
-    public string StudentId { get; set; } = null!;
-
-    /// <summary>
-    /// Время сдачи работы (UTC).
-    /// </summary>
+    
+    [JsonPropertyName("studentId")]
+    public int StudentId { get; set; }
+    
+    [JsonPropertyName("assignmentId")]
+    public int AssignmentId { get; set; }
+    
+    [JsonPropertyName("fileName")]
+    public string FileName { get; set; } = string.Empty;
+    
+    [JsonPropertyName("fileSize")]
+    public long FileSize { get; set; }
+    
+    [JsonPropertyName("submittedAt")]
     public DateTime SubmittedAt { get; set; }
-
-    /// <summary>
-    /// Путь к файлу на сервере (или логический идентификатор).
-    /// </summary>
-    public string FilePath { get; set; } = null!;
+    
+    [JsonPropertyName("filePath")]
+    public string FilePath { get; set; } = string.Empty;  // Добавлено!
+    
+    [JsonPropertyName("downloadUrl")]
+    public string DownloadUrl { get; set; } = string.Empty;
+    
+    [JsonPropertyName("previewUrl")]
+    public string? PreviewUrl { get; set; }
 }

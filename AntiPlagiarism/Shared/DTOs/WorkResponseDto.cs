@@ -2,7 +2,7 @@ using System.Text.Json.Serialization;
 
 namespace Shared.DTOs;
 
-public class UploadWorkResponseDto
+public class WorkResponseDto
 {
     [JsonPropertyName("workId")]
     public int WorkId { get; set; }
@@ -16,15 +16,9 @@ public class UploadWorkResponseDto
     [JsonPropertyName("submittedAt")]
     public DateTime SubmittedAt { get; set; }
     
-    [JsonPropertyName("analysisStarted")]
-    public bool AnalysisStarted { get; set; }
-    
-    [JsonPropertyName("error")]
-    public string? Error { get; set; }
+    [JsonPropertyName("filePath")]
+    public string FilePath { get; set; } = string.Empty;
     
     [JsonPropertyName("fileUrl")]
-    public string? FileUrl { get; set; }
-    
-    [JsonPropertyName("correlationId")]
-    public string? CorrelationId { get; set; }
+    public string FileUrl { get; set; } = string.Empty;
 }
