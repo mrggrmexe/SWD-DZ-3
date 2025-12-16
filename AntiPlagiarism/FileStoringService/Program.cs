@@ -1,191 +1,295 @@
-using FileStoringService.Models;
+using System.Text.Json;
 using FileStoringService.Repositories;
+using FileStoringService.HealthChecks;
+using FileStoringService.Filters;
+using Microsoft.OpenApi.Models;
+using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.AspNetCore.OpenApi;
-using Shared.DTOs;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// ---------- СЕРВИСЫ ----------
+// Add services to the container
+builder.Services.AddControllers()
+    .AddJsonOptions(options =>
+    {
+        options.JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
+        options.JsonSerializerOptions.WriteIndented = true;
+        options.JsonSerializerOptions.DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull;
+    });
 
-// OpenAPI (встроенный в .NET 9)
-builder.Services.AddOpenApi();
 builder.Services.AddEndpointsApiExplorer();
 
-// Единый формат ошибок
-builder.Services.AddProblemDetails();
+// Configure Swagger/OpenAPI
+builder.Services.AddSwaggerGen(c =>
+{
+    c.SwaggerDoc("v1", new OpenApiInfo
+    {
+        Title = "File Storing Service API",
+        Version = "v1",
+        Description = "Service for storing and retrieving student works",
+        Contact = new OpenApiContact
+        {
+            Name = "File Storing Service Team",
+            Email = "support@filestoring.example.com"
+        },
+        License = new OpenApiLicense
+        {
+            Name = "MIT License",
+            Url = new Uri("https://opensource.org/licenses/MIT")
+        }
+    });
+    
+    // Добавляем поддержку аннотаций
+    c.EnableAnnotations();
+    
+    // Добавляем фильтр для работы с workId
+    c.ParameterFilter<WorkIdParameterFilter>();
+    
+    // Добавляем XML комментарии (если есть)
+    var xmlFile = $"{System.Reflection.Assembly.GetExecutingAssembly().GetName().Name}.xml";
+    var xmlPath = Path.Combine(AppContext.BaseDirectory, xmlFile);
+    if (File.Exists(xmlPath))
+    {
+        c.IncludeXmlComments(xmlPath);
+    }
+    
+    // Настраиваем Bearer Auth (опционально)
+    c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+    {
+        Description = "JWT Authorization header using the Bearer scheme. Example: \"Authorization: Bearer {token}\"",
+        Name = "Authorization",
+        In = ParameterLocation.Header,
+        Type = SecuritySchemeType.ApiKey,
+        Scheme = "Bearer"
+    });
+    
+    c.AddSecurityRequirement(new OpenApiSecurityRequirement
+    {
+        {
+            new OpenApiSecurityScheme
+            {
+                Reference = new OpenApiReference
+                {
+                    Type = ReferenceType.SecurityScheme,
+                    Id = "Bearer"
+                }
+            },
+            Array.Empty<string>()
+        }
+    });
+});
 
-// In-memory репозиторий сдач
-builder.Services.AddSingleton<IWorkRepository, InMemoryWorkRepository>();
+// Register repository as singleton (in-memory)
+builder.Services.AddSingleton<IWorkRepository>(provider =>
+{
+    var logger = provider.GetRequiredService<ILogger<InMemoryWorkRepository>>();
+    return new InMemoryWorkRepository(logger);
+});
+
+// Register Health Checks
+builder.Services.AddHealthChecks()
+    .AddCheck<FileStorageHealthCheck>("file_storage")
+    .AddCheck<MemoryHealthCheck>("memory");
+
+// Configure logging
+builder.Logging.ClearProviders();
+builder.Logging.AddConsole();
+builder.Logging.AddDebug();
+builder.Logging.AddConfiguration(builder.Configuration.GetSection("Logging"));
+
+// Configuration
+builder.Services.Configure<StorageOptions>(
+    builder.Configuration.GetSection("Storage"));
+
+// Register HttpClient for inter-service communication
+builder.Services.AddHttpClient("FileAnalysisService", client =>
+{
+    client.BaseAddress = new Uri(builder.Configuration["FileAnalysisService:BaseUrl"] 
+        ?? "http://localhost:5002");
+    client.DefaultRequestHeaders.Add("Accept", "application/json");
+    client.Timeout = TimeSpan.FromSeconds(30);
+});
+
+// Add CORS for development
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowAll", policy =>
+    {
+        policy.AllowAnyOrigin()
+              .AllowAnyMethod()
+              .AllowAnyHeader();
+    });
+});
 
 var app = builder.Build();
 
-// ---------- НАСТРОЙКА КОРНЯ ХРАНИЛИЩА ФАЙЛОВ ----------
-
-// 1) ENV: FILE_STORAGE_ROOT
-var envStorageRoot = app.Configuration["FILE_STORAGE_ROOT"];
-
-// 2) appsettings.json: "FileStorage:RootPath"
-var configStorageRoot = app.Configuration["FileStorage:RootPath"];
-
-// 3) дефолт: {ContentRoot}/storage
-var defaultStorageRoot = Path.Combine(app.Environment.ContentRootPath, "storage");
-
-var storageRoot = !string.IsNullOrWhiteSpace(envStorageRoot)
-    ? envStorageRoot
-    : !string.IsNullOrWhiteSpace(configStorageRoot)
-        ? configStorageRoot!
-        : defaultStorageRoot;
-
-Directory.CreateDirectory(storageRoot);
-app.Logger.LogInformation("File storage root: {StorageRoot}", storageRoot);
-
-// ---------- PIPELINE ----------
-
+// Configure the HTTP request pipeline
 if (app.Environment.IsDevelopment())
 {
-    app.MapOpenApi();
+    app.UseDeveloperExceptionPage();
+    app.UseCors("AllowAll");
+    
+    app.UseSwagger(c =>
+    {
+        c.RouteTemplate = "api-docs/{documentName}/swagger.json";
+        c.PreSerializeFilters.Add((swaggerDoc, httpReq) =>
+        {
+            swaggerDoc.Servers = new List<OpenApiServer>
+            {
+                new OpenApiServer { Url = $"{httpReq.Scheme}://{httpReq.Host.Value}" },
+                new OpenApiServer { Url = "http://localhost:5001" },
+                new OpenApiServer { Url = "http://file-storing-service:8080" }
+            };
+        });
+    });
+    
+    app.UseSwaggerUI(c =>
+    {
+        c.SwaggerEndpoint("/api-docs/v1/swagger.json", "File Storing Service API v1");
+        c.RoutePrefix = "api-docs";
+        c.DocumentTitle = "File Storing Service API Documentation";
+        c.DisplayRequestDuration();
+        c.EnableDeepLinking();
+        c.DefaultModelsExpandDepth(-1); // Скрыть модели по умолчанию
+    });
+}
+else
+{
+    app.UseExceptionHandler("/error");
+    app.UseHsts();
 }
 
-app.UseExceptionHandler();
-app.UseStatusCodePages();
+// Global exception handler middleware
+app.UseExceptionHandler(exceptionHandlerApp =>
+{
+    exceptionHandlerApp.Run(async context =>
+    {
+        var exception = context.Features.Get<IExceptionHandlerFeature>()?.Error;
+        var correlationId = Guid.NewGuid().ToString();
+        
+        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+        context.Response.ContentType = "application/json";
+        
+        var logger = context.RequestServices.GetRequiredService<ILogger<Program>>();
+        logger.LogError(exception, "[{CorrelationId}] Unhandled exception occurred", correlationId);
+        
+        var problemDetails = new ProblemDetails
+        {
+            Title = "An unexpected error occurred",
+            Status = StatusCodes.Status500InternalServerError,
+            Detail = app.Environment.IsDevelopment() ? exception?.Message : "Please contact support",
+            Instance = context.Request.Path,
+            Extensions = new Dictionary<string, object?>
+            {
+                ["correlationId"] = correlationId,
+                ["timestamp"] = DateTime.UtcNow,
+                ["traceId"] = context.TraceIdentifier
+            }
+        };
+        
+        context.Response.Headers.Append("X-Correlation-ID", correlationId);
+        await context.Response.WriteAsJsonAsync(problemDetails);
+    });
+});
+
+// Request logging middleware
+app.Use(async (context, next) =>
+{
+    var correlationId = context.Request.Headers["X-Correlation-ID"].FirstOrDefault() 
+        ?? Guid.NewGuid().ToString();
+    
+    context.Items["CorrelationId"] = correlationId;
+    context.Response.Headers.Append("X-Correlation-ID", correlationId);
+    
+    var logger = context.RequestServices.GetRequiredService<ILogger<Program>>();
+    var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+    
+    try
+    {
+        logger.LogInformation(
+            "[{CorrelationId}] {Method} {Path} started from {RemoteIp}",
+            correlationId, 
+            context.Request.Method, 
+            context.Request.Path,
+            context.Connection.RemoteIpAddress);
+        
+        await next();
+        
+        stopwatch.Stop();
+        
+        logger.LogInformation(
+            "[{CorrelationId}] {Method} {Path} completed in {ElapsedMs}ms with status {StatusCode}",
+            correlationId, 
+            context.Request.Method, 
+            context.Request.Path,
+            stopwatch.ElapsedMilliseconds, 
+            context.Response.StatusCode);
+    }
+    catch (Exception)
+    {
+        stopwatch.Stop();
+        logger.LogError(
+            "[{CorrelationId}] {Method} {Path} failed after {ElapsedMs}ms",
+            correlationId, 
+            context.Request.Method, 
+            context.Request.Path,
+            stopwatch.ElapsedMilliseconds);
+        throw;
+    }
+});
+
+// Health check endpoint
+app.MapHealthChecks("/health", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
+{
+    ResponseWriter = async (context, report) =>
+    {
+        context.Response.ContentType = "application/json";
+        
+        var result = new
+        {
+            status = report.Status.ToString(),
+            checks = report.Entries.Select(e => new
+            {
+                name = e.Key,
+                status = e.Value.Status.ToString(),
+                duration = e.Value.Duration.TotalMilliseconds,
+                description = e.Value.Description,
+                data = e.Value.Data
+            }),
+            totalDuration = report.TotalDuration.TotalMilliseconds
+        };
+        
+        await context.Response.WriteAsJsonAsync(result);
+    }
+});
+
+// Simple status endpoint
+app.MapGet("/", () => Results.Ok(new
+{
+    service = "File Storing Service",
+    version = "1.0.0",
+    status = "running",
+    timestamp = DateTime.UtcNow,
+    endpoints = new[]
+    {
+        new { path = "/api/files", methods = new[] { "POST", "GET" } },
+        new { path = "/api/files/{id}/meta", methods = new[] { "GET" } },
+        new { path = "/api/files/{id}/download", methods = new[] { "GET" } },
+        new { path = "/health", methods = new[] { "GET" } },
+        new { path = "/api-docs", methods = new[] { "GET" } }
+    }
+}));
+
 app.UseHttpsRedirection();
-
-// ---------- ENDPOINTS ----------
-
-// Health-check
-app.MapGet("/health", () => Results.Ok("FileStoringService OK"))
-    .WithName("FileStoringHealth")
-    .WithTags("Health");
-
-
-// POST /files — приём файла и метаданных, возврат WorkMetaDto
-app.MapPost("/files", async (
-        HttpContext context,
-        [FromServices] ILogger<Program> logger,
-        [FromServices] IWorkRepository workRepository,
-        CancellationToken cancellationToken) =>
-    {
-        // 1. Проверяем, что запрос multipart/form-data
-        if (!context.Request.HasFormContentType)
-        {
-            return Results.Problem(
-                title: "Некорректный тип содержимого",
-                detail: "Ожидается multipart/form-data",
-                statusCode: StatusCodes.Status400BadRequest);
-        }
-
-        var form = await context.Request.ReadFormAsync(cancellationToken);
-
-        var file = form.Files["file"];
-        var studentId = form["studentId"].ToString();
-        var assignmentId = form["assignmentId"].ToString();
-
-        // 2. Базовая валидация
-        if (file is null || file.Length == 0)
-        {
-            return Results.Problem(
-                title: "Файл не передан",
-                detail: "Поле 'file' обязательно и не может быть пустым",
-                statusCode: StatusCodes.Status400BadRequest);
-        }
-
-        if (string.IsNullOrWhiteSpace(studentId) ||
-            string.IsNullOrWhiteSpace(assignmentId))
-        {
-            return Results.Problem(
-                title: "Неверные данные",
-                detail: "Поля 'studentId' и 'assignmentId' обязательны",
-                statusCode: StatusCodes.Status400BadRequest);
-        }
-
-        // 3. Время сдачи — фиксируем сейчас (UTC)
-        var submittedAt = DateTime.UtcNow;
-
-        // 4. Создаём Work без Id и FilePath
-        var work = new Work
-        {
-            StudentId = studentId,
-            AssignmentId = assignmentId,
-            SubmittedAt = submittedAt,
-            FilePath = string.Empty // заполним после генерации workId и сохранения файла
-        };
-
-        // 5. Сохраняем Work в репозиторий — он генерирует новый Id (workId)
-        work = await workRepository.AddAsync(work, cancellationToken);
-
-        // 6. Формируем имя файла на основе work.Id
-        var safeFileName = Path.GetFileName(file.FileName);
-        var newFileName = $"{work.Id}_{work.AssignmentId}_{work.StudentId}_{safeFileName}";
-        var filePath = Path.Combine(storageRoot, newFileName);
-
-        // 7. Сохраняем файл на диск
-        try
-        {
-            await using var stream = File.Create(filePath);
-            await file.CopyToAsync(stream, cancellationToken);
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex,
-                "Ошибка при сохранении файла для workId={WorkId}", work.Id);
-
-            return Results.Problem(
-                title: "Ошибка сохранения файла",
-                detail: "Не удалось сохранить файл на сервере",
-                statusCode: StatusCodes.Status500InternalServerError);
-        }
-
-        // 8. Обновляем путь к файлу в сущности
-        work.FilePath = filePath;
-
-        // 9. Формируем DTO для ответа
-        var meta = new WorkMetaDto
-        {
-            WorkId = work.Id,
-            AssignmentId = work.AssignmentId,
-            StudentId = work.StudentId,
-            SubmittedAt = work.SubmittedAt,
-            FilePath = work.FilePath
-        };
-
-        // 10. Возвращаем JSON с workId и метаданными
-        return Results.Ok(meta);
-    })
-    .Accepts<IFormFile>("multipart/form-data")
-    .Produces<WorkMetaDto>(StatusCodes.Status200OK)
-    .WithName("UploadFile")
-    .WithTags("Files");
-
-
-// GET /files/{workId}/meta — метаданные сдачи
-app.MapGet("/files/{workId:int}/meta", async (
-        int workId,
-        [FromServices] IWorkRepository workRepository,
-        CancellationToken cancellationToken) =>
-    {
-        var work = await workRepository.GetByIdAsync(workId, cancellationToken);
-        if (work is null)
-        {
-            return Results.Problem(
-                title: "Сдача не найдена",
-                detail: $"Сдача с идентификатором {workId} не найдена",
-                statusCode: StatusCodes.Status404NotFound);
-        }
-
-        var meta = new WorkMetaDto
-        {
-            WorkId = work.Id,
-            AssignmentId = work.AssignmentId,
-            StudentId = work.StudentId,
-            SubmittedAt = work.SubmittedAt,
-            FilePath = work.FilePath
-        };
-
-        return Results.Ok(meta);
-    })
-    .Produces<WorkMetaDto>(StatusCodes.Status200OK)
-    .WithName("GetFileMeta")
-    .WithTags("Files");
+app.UseAuthorization();
+app.MapControllers();
 
 app.Run();
+
+// Configuration classes
+public class StorageOptions
+{
+    public string Path { get; set; } = "storage";
+    public long MaxFileSize { get; set; } = 10485760; // 10 MB
+    public string[] AllowedExtensions { get; set; } = { ".txt", ".pdf", ".doc", ".docx", ".zip" };
+}

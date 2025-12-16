@@ -1,48 +1,200 @@
-using System.Collections.Concurrent;
+using FileStoringService.Helpers;
 using FileStoringService.Models;
 
 namespace FileStoringService.Repositories;
 
-/// <summary>
-/// Простая in-memory реализация репозитория сдач.
-/// Потокобезопасна за счёт ConcurrentDictionary + Interlocked.
-/// </summary>
 public class InMemoryWorkRepository : IWorkRepository
 {
-    private readonly ConcurrentDictionary<int, Work> _storage = new();
-    private int _nextId = 0;
+    private readonly Dictionary<string, Work> _works = new();
+    private readonly Dictionary<string, string> _normalizedIds = new(); // Кэш нормализованных ID
+    private readonly ILogger<InMemoryWorkRepository> _logger;
+    private readonly object _lock = new();
 
-    public Task<Work> AddAsync(Work work, CancellationToken cancellationToken = default)
+    public InMemoryWorkRepository(ILogger<InMemoryWorkRepository> logger)
     {
-        // Присваиваем новый Id
-        var id = Interlocked.Increment(ref _nextId);
-        work.Id = id;
+        _logger = logger;
+    }
 
-        if (!_storage.TryAdd(id, work))
+    public void Add(Work work)
+    {
+        if (string.IsNullOrWhiteSpace(work.WorkId))
+            throw new ArgumentException("WorkId cannot be null or empty", nameof(work));
+
+        lock (_lock)
         {
-            // Это очень маловероятно, но на всякий случай.
-            throw new InvalidOperationException($"Не удалось добавить работу с Id={id} в хранилище.");
+            // Нормализуем ID для поиска
+            var normalizedId = WorkIdHelper.NormalizeWorkId(work.WorkId);
+            
+            if (_works.ContainsKey(work.WorkId))
+            {
+                _logger.LogWarning("Work with ID {WorkId} already exists. Overwriting.", work.WorkId);
+            }
+
+            _works[work.WorkId] = work;
+            
+            // Сохраняем нормализованный ID для поиска
+            if (!string.IsNullOrEmpty(normalizedId) && normalizedId != work.WorkId)
+            {
+                _normalizedIds[normalizedId] = work.WorkId;
+            }
+
+            _logger.LogInformation("Work added: {WorkId} for student {StudentId}, assignment {AssignmentId}",
+                work.WorkId, work.StudentId, work.AssignmentId);
+        }
+    }
+
+    public Work? GetById(string workId)
+    {
+        if (string.IsNullOrWhiteSpace(workId))
+            return null;
+
+        lock (_lock)
+        {
+            return _works.TryGetValue(workId, out var work) ? work : null;
+        }
+    }
+
+    public Work? GetByNormalizedId(string normalizedWorkId)
+    {
+        if (string.IsNullOrWhiteSpace(normalizedWorkId))
+            return null;
+
+        lock (_lock)
+        {
+            // Пытаемся найти через кэш нормализованных ID
+            if (_normalizedIds.TryGetValue(normalizedWorkId, out var originalWorkId))
+            {
+                return GetById(originalWorkId);
+            }
+
+            return null;
+        }
+    }
+
+    public Work? FindByAnyId(string workId)
+    {
+        if (string.IsNullOrWhiteSpace(workId))
+            return null;
+
+        // 1. Пробуем найти по оригинальному ID
+        var work = GetById(workId);
+        if (work != null)
+        {
+            _logger.LogDebug("Work found by original ID: {WorkId}", workId);
+            return work;
         }
 
-        return Task.FromResult(work);
+        // 2. Пробуем найти по нормализованному ID
+        var normalizedId = WorkIdHelper.NormalizeWorkId(workId);
+        work = GetByNormalizedId(normalizedId);
+        if (work != null)
+        {
+            _logger.LogDebug("Work found by normalized ID: {NormalizedId} -> {OriginalId}", 
+                normalizedId, work.WorkId);
+            return work;
+        }
+
+        // 3. Линейный поиск по всем работам (fallback)
+        lock (_lock)
+        {
+            work = _works.Values.FirstOrDefault(w => 
+                w.WorkId.Equals(workId, StringComparison.OrdinalIgnoreCase) ||
+                w.WorkId.Replace("-", "").StartsWith(workId.Replace("-", "")) ||
+                WorkIdHelper.GetClientWorkId(w.WorkId).ToString() == workId);
+
+            if (work != null)
+            {
+                _logger.LogDebug("Work found by fallback search: {WorkId}", workId);
+            }
+        }
+
+        return work;
     }
 
-    public Task<Work?> GetByIdAsync(int id, CancellationToken cancellationToken = default)
+    public IEnumerable<Work> GetByAssignmentId(int assignmentId)
     {
-        _storage.TryGetValue(id, out var work);
-        return Task.FromResult(work);
+        lock (_lock)
+        {
+            return _works.Values
+                .Where(w => w.AssignmentId == assignmentId)
+                .OrderByDescending(w => w.SubmittedAt)
+                .ToList();
+        }
     }
 
-    public Task<IReadOnlyList<Work>> GetByAssignmentAsync(
-        string assignmentId,
-        CancellationToken cancellationToken = default)
+    public IEnumerable<Work> GetByStudentId(int studentId)
     {
-        var result = _storage.Values
-            .Where(w => w.AssignmentId == assignmentId)
-            .OrderBy(w => w.SubmittedAt)
-            .ToList()
-            .AsReadOnly();
+        lock (_lock)
+        {
+            return _works.Values
+                .Where(w => w.StudentId == studentId)
+                .OrderByDescending(w => w.SubmittedAt)
+                .ToList();
+        }
+    }
 
-        return Task.FromResult((IReadOnlyList<Work>)result);
+    public IEnumerable<Work> GetAll()
+    {
+        lock (_lock)
+        {
+            return _works.Values.ToList();
+        }
+    }
+
+    public bool Exists(string workId)
+    {
+        if (string.IsNullOrWhiteSpace(workId))
+            return false;
+
+        lock (_lock)
+        {
+            return _works.ContainsKey(workId) || 
+                   _normalizedIds.ContainsKey(WorkIdHelper.NormalizeWorkId(workId));
+        }
+    }
+
+    public int Count()
+    {
+        lock (_lock)
+        {
+            return _works.Count;
+        }
+    }
+
+    public int CountByAssignment(int assignmentId)
+    {
+        lock (_lock)
+        {
+            return _works.Values.Count(w => w.AssignmentId == assignmentId);
+        }
+    }
+
+    public void Remove(string workId)
+    {
+        if (string.IsNullOrWhiteSpace(workId))
+            return;
+
+        lock (_lock)
+        {
+            if (_works.Remove(workId, out var removedWork))
+            {
+                // Удаляем из кэша нормализованных ID
+                var normalizedId = WorkIdHelper.NormalizeWorkId(workId);
+                _normalizedIds.Remove(normalizedId);
+                
+                _logger.LogInformation("Work removed: {WorkId}", workId);
+            }
+        }
+    }
+
+    public void Clear()
+    {
+        lock (_lock)
+        {
+            int count = _works.Count;
+            _works.Clear();
+            _normalizedIds.Clear();
+            _logger.LogInformation("Repository cleared. Removed {Count} works.", count);
+        }
     }
 }

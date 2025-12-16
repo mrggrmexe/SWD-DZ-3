@@ -1,44 +1,27 @@
+using System.Text.Json.Serialization;
+
 namespace Shared.DTOs;
 
-/// <summary>
-/// Краткая информация об отчёте по проверке.
-/// Используется в списках отчётов (например, по заданию).
-/// </summary>
 public class ReportSummaryDto
 {
-    /// <summary>
-    /// Идентификатор отчёта.
-    /// </summary>
+    [JsonPropertyName("reportId")]
     public int ReportId { get; set; }
-
-    /// <summary>
-    /// Идентификатор конкретной сдачи (work / submission),
-    /// к которой относится этот отчёт.
-    /// </summary>
+    
+    [JsonPropertyName("workId")]
     public int WorkId { get; set; }
-
-    /// <summary>
-    /// Идентификатор студента, который сдавал работу.
-    /// </summary>
-    public string StudentId { get; set; } = null!;
-
-    /// <summary>
-    /// true, если обнаружены признаки плагиата.
-    /// </summary>
+    
+    [JsonPropertyName("studentId")]
+    public int StudentId { get; set; }
+    
+    [JsonPropertyName("isPlagiarism")]
     public bool IsPlagiarism { get; set; }
-
-    /// <summary>
-    /// Статус анализа: Pending / Done / Error.
-    /// </summary>
-    public string Status { get; set; } = null!;
-
-    /// <summary>
-    /// Время создания отчёта (UTC).
-    /// </summary>
+    
+    [JsonPropertyName("status")]
+    public string Status { get; set; } = string.Empty;
+    
+    [JsonPropertyName("createdAt")]
     public DateTime CreatedAt { get; set; }
-
-    /// <summary>
-    /// (Опционально) URL на облако слов по этой работе.
-    /// </summary>
+    
+    [JsonPropertyName("wordCloudUrl")]
     public string? WordCloudUrl { get; set; }
 }

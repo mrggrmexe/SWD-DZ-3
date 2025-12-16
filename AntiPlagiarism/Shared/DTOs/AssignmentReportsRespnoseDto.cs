@@ -1,18 +1,19 @@
+using System.Text.Json.Serialization;
+
 namespace Shared.DTOs;
 
-/// <summary>
-/// Ответ Gateway / FileAnalysisService при запросе
-/// отчётов по конкретному заданию (контрольной работе).
-/// </summary>
 public class AssignmentReportsResponseDto
 {
-    /// <summary>
-    /// Идентификатор задания (контрольной работы).
-    /// </summary>
-    public string AssignmentId { get; set; } = null!;
-
-    /// <summary>
-    /// Список отчётов по всем сдачам этого задания.
-    /// </summary>
+    [JsonPropertyName("assignmentId")]
+    public int AssignmentId { get; set; }
+    
+    [JsonPropertyName("reports")]
     public List<ReportSummaryDto> Reports { get; set; } = new();
+    
+    // Опциональные поля - добавьте если нужны
+    [JsonPropertyName("totalCount")]
+    public int TotalCount { get; set; }
+    
+    [JsonPropertyName("plagiarismCount")]
+    public int PlagiarismCount { get; set; }
 }

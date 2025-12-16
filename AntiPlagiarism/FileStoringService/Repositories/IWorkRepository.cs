@@ -2,27 +2,24 @@ using FileStoringService.Models;
 
 namespace FileStoringService.Repositories;
 
-/// <summary>
-/// Абстракция хранилища сдач работ.
-/// Позволяет легко подменить in-memory на EF Core.
-/// </summary>
 public interface IWorkRepository
 {
-    /// <summary>
-    /// Добавить новую сдачу.
-    /// Id присваивается при сохранении.
-    /// </summary>
-    Task<Work> AddAsync(Work work, CancellationToken cancellationToken = default);
-
-    /// <summary>
-    /// Найти сдачу по идентификатору.
-    /// </summary>
-    Task<Work?> GetByIdAsync(int id, CancellationToken cancellationToken = default);
-
-    /// <summary>
-    /// Получить все сдачи по заданию (опционально, на будущее).
-    /// </summary>
-    Task<IReadOnlyList<Work>> GetByAssignmentAsync(
-        string assignmentId,
-        CancellationToken cancellationToken = default);
+    void Add(Work work);
+    Work? GetById(string workId);
+    Work? GetByNormalizedId(string normalizedWorkId);
+    IEnumerable<Work> GetByAssignmentId(int assignmentId);
+    IEnumerable<Work> GetByStudentId(int studentId);
+    
+    // Новые методы для поиска по разным форматам
+    Work? FindByAnyId(string workId);
+    bool Exists(string workId);
+    IEnumerable<Work> GetAll();
+    
+    // Методы для статистики
+    int Count();
+    int CountByAssignment(int assignmentId);
+    
+    // Методы для очистки (опционально)
+    void Remove(string workId);
+    void Clear();
 }
