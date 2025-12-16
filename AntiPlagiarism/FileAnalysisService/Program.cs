@@ -15,7 +15,7 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddHttpClient("FileStoringService", (sp, client) =>
 {
     var configuration = sp.GetRequiredService<IConfiguration>();
-    var baseUrl = configuration["FILE_STORING_BASE_URL"] ?? "http://localhost:5001";
+    var baseUrl = configuration["FILE_STORING_BASE_URL"] ?? "http://localhost:5002";
     client.BaseAddress = new Uri(baseUrl);
     client.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
     client.Timeout = TimeSpan.FromSeconds(10);
